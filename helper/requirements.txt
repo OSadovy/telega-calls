@@ -1,0 +1,2 @@
+ntgcalls==3.0.7
+sounddevice==0.5.6
