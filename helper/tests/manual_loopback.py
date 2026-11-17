@@ -4,8 +4,8 @@ in-memory relay carries their signalling.
 
 Needs real audio devices, so it is run by hand:  the callee sends the
 default microphone, and the Call plays it on the default output for
-SECONDS (default 8).  Expect both peers CONNECTED, no starving, and a
-peak in the thousands while someone speaks.
+SECONDS (default 8).  Expect both peers CONNECTED, and to hear the
+microphone.
 """
 
 import asyncio
@@ -23,8 +23,9 @@ import telega_calls_helper as helper  # noqa: E402
 async def main(seconds):
     loop = asyncio.get_running_loop()
     ntg = NTgCalls()
-    mic = helper.pick(NTgCalls.get_media_devices().microphone, "Default - ")
-    call = helper.Call(ntg, mic)
+    devices = NTgCalls.get_media_devices()
+    mic = helper.default_device(devices.microphone, True)
+    call = helper.Call(ntg, mic, helper.default_device(devices.speaker, False))
     connected = {}
     done = asyncio.Event()
 
@@ -43,7 +44,6 @@ async def main(seconds):
 
     ntg.on_signaling_data(on_signal)
     ntg.on_connection_change(on_state)
-    ntg.on_frames(call.on_frames)
 
     key = os.urandom(256)
     await ntg.create_p2p_call(2)

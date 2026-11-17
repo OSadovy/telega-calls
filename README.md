@@ -28,9 +28,8 @@ to either: any program speaking the JSON-lines protocol at the top of
    C:\Users\me\telega-calls\venv\Scripts\python -m pip install -r helper\requirements.txt
    ```
 
-   On Linux, PortAudio comes from the system (`libportaudio2` on Debian
-   and Ubuntu, `portaudio` on Fedora and Arch), and recording needs a
-   PulseAudio server, which PipeWire provides through `pipewire-pulse`:
+   On Linux the helper needs a PulseAudio server, which PipeWire provides
+   through `pipewire-pulse`:
 
    ```
    python3 -m venv ~/.local/share/telega-calls/venv
@@ -68,12 +67,10 @@ in `*telega-calls*`.
 
 - `telega-calls-microphone`: part of a microphone's name, as the helper's
   `--devices` lists them. Unset, each call uses the system default.
-- Playback always goes to the system's default output. If that device
-  goes away during a call, playback moves to whichever output is the
-  default then.
-- `telega-calls-debug`: log the helper's playback statistics in
-  `*telega-calls*` every five seconds: how full its buffer runs, whether
-  it ran dry, and the peak level of the incoming audio.
+- Playback always goes to the system's default output. If a device in use
+  goes away during a call, NTgCalls reopens the default there is then.
+- `telega-calls-debug`: log the helper's debugging messages, such as its
+  connection state, in `*telega-calls*`.
 - `telega-calls-log-directory`, `telega-calls-trace`: keep NTgCalls' and
   WebRTC's logs, one file per call. They contain connection details.
 
@@ -95,8 +92,6 @@ in `*telega-calls*`.
   plays to the default output, so it uses them with no setting of its own.
   PulseAudio's `module-echo-cancel` works the same way. Not yet tried with
   telega-calls.
-- Playback goes through the helper rather than NTgCalls, whose Windows
-  speaker output hangs the call before it connects.
 
 ## Tests
 

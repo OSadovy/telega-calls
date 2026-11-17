@@ -10,21 +10,18 @@ stdin and reads JSON lines on stdout:
   out: {"ev": "ready", "mic", "speaker"}
        {"ev": "signal", "data": base64}   (for sendCallSignalingData)
        {"ev": "state", "state", "kind"}
-       {"ev": "output", "name"}           (playback moved to another device)
        {"ev": "error", "op", "message"}
        {"ev": "stopped"}
 
-Diagnostics go to stderr; `--debug` adds playback statistics every five
-seconds and at the end of the call.  `--log-dir` keeps them in a file there
-too, beside NTgCalls' and WebRTC's logs, in full with `--trace`.
-`--protocol` prints the callProtocol to offer TDLib, `--devices` lists the
-microphones.
+Diagnostics go to stderr; `--debug` adds connection state changes.
+`--log-dir` keeps them in a file there too, beside NTgCalls' and WebRTC's
+logs, in full with `--trace`.  `--protocol` prints the callProtocol to
+offer TDLib, `--devices` lists the microphones and speakers.
 """
 
 import argparse
 import asyncio
 import base64
-import importlib
 import json
 import logging
 import os
@@ -44,14 +41,6 @@ from ntgcalls import (
 # py-tgcalls' default (AudioQuality.HIGH).
 SAMPLE_RATE = 48000
 CHANNELS = 2
-BYTES_PER_MS = SAMPLE_RATE * CHANNELS * 2 // 1000
-
-# Playback: the output latency asked of the device, the received audio held
-# before playing starts or resumes after running dry, and the most held
-# before the oldest is dropped back down to the target.
-OUTPUT_LATENCY = 0.01
-TARGET_BUFFER_MS = 20
-MAX_BUFFER_MS = 50
 
 log = logging.getLogger("telega_calls")
 _out_lock = threading.Lock()
@@ -95,25 +84,28 @@ def pick(devices, needle):
     raise SystemExit(f"no device matching {needle!r} among: {names}")
 
 
-class Microphone:
+class Device:
     def __init__(self, name, metadata):
         self.name = name
         self.metadata = metadata
 
 
-def default_microphone(devices):
-    """The system's default microphone, followed rather than fixed.
+def default_device(devices, is_microphone):
+    """The system's default microphone or speaker, followed rather than fixed.
 
-    NTgCalls lists Windows' default as a "Default - " entry, which also
-    keeps it out of the Communications role and its turning other audio
-    down.  Elsewhere it records through PulseAudio, which resolves the name
-    @DEFAULT_SOURCE@ itself; PipeWire's PulseAudio server does the same.
+    NTgCalls lists Windows' defaults as "Default - " entries, which also
+    keeps them out of the Communications role and its turning other audio
+    down.  Elsewhere it goes through PulseAudio, which resolves the names
+    @DEFAULT_SOURCE@ and @DEFAULT_SINK@ itself; PipeWire's PulseAudio server
+    does the same.
     """
     for device in devices:
         if device.name.startswith("Default - "):
             return device
-    return Microphone("default source",
-                      json.dumps({"is_microphone": True, "id": "@DEFAULT_SOURCE@"}))
+    return Device("default source" if is_microphone else "default sink",
+                  json.dumps({"is_microphone": is_microphone,
+                              "id": "@DEFAULT_SOURCE@" if is_microphone
+                              else "@DEFAULT_SINK@"}))
 
 
 def b64(data):
@@ -145,179 +137,12 @@ def device_audio(device):
                             device.metadata, False)
 
 
-def import_sounddevice():
-    """Import sounddevice on a thread of its own.
-
-    On Windows PortAudio initialises COM on the importing thread in a mode
-    that makes NTgCalls' device calls on that thread abort the process.
-    """
-    loaded = {}
-    thread = threading.Thread(
-        target=lambda: loaded.update(module=importlib.import_module("sounddevice")))
-    thread.start()
-    thread.join()
-    return loaded["module"]
-
-
-sounddevice = None
-
-
-def output_device():
-    """The default output, through WASAPI where there is one.
-
-    MME, PortAudio's default on Windows, adds about 90 ms.
-    """
-    for api in sounddevice.query_hostapis():
-        if api["name"] == "Windows WASAPI":
-            return api["default_output_device"], sounddevice.WasapiSettings(auto_convert=True)
-    return sounddevice.default.device[1], None
-
-
-class Player:
-    """Play the remote audio, which NTgCalls hands over as 10 ms PCM frames.
-
-    NTgCalls' own Windows output (a DEVICE playback source) stalls its
-    callback thread, so the call never connects; the frames are taken as
-    EXTERNAL instead and played here, by a thread writing to the stream:
-    PortAudio's WASAPI stream driven by a callback can play nothing.
-
-    ON_OUTPUT is called with the device's name when playback has to move to
-    another one.
-    """
-
-    CHUNK = 10 * BYTES_PER_MS
-    RETRY_SECONDS = 1
-
-    def __init__(self, on_output=None):
-        global sounddevice
-        sounddevice = sounddevice or import_sounddevice()
-        self._init_buffer()
-        self.on_output = on_output or (lambda _name: None)
-        self._open()
-        self.stopping = False
-        self.writer = threading.Thread(target=self._write, daemon=True)
-        self.writer.start()
-
-    def _open(self):
-        device, extra = output_device()
-        stream = sounddevice.RawOutputStream(
-            device=device, samplerate=SAMPLE_RATE, channels=CHANNELS,
-            dtype="int16", latency=OUTPUT_LATENCY, extra_settings=extra)
-        stream.start()
-        self.stream = stream
-        self.device_name = sounddevice.query_devices(device)["name"]
-
-    def _reopen(self):
-        """Move playback to the current default output after a write failed.
-
-        PortAudio reads the device list once, when initialised, so it is
-        restarted to see the devices present now.
-        """
-        try:
-            self.stream.close(ignore_errors=True)
-        except Exception:
-            pass
-        while not self.stopping:
-            try:
-                sounddevice._terminate()
-                sounddevice._initialize()
-                self._open()
-            except Exception as e:
-                log.warning("no output to move to: %s: %s", type(e).__name__, e)
-                time.sleep(self.RETRY_SECONDS)
-                continue
-            log.info("playback moved to %s", self.device_name)
-            self.on_output(self.device_name)
-            return
-
-    def _init_buffer(self):
-        self.buffer = bytearray()
-        self.filling = True
-        self.delivered = 0
-        self.stats = self._new_stats()
-        self.lock = threading.Lock()
-
-    @staticmethod
-    def _new_stats():
-        return {"chunks": 0, "level_sum": 0, "level_min": None, "level_max": 0,
-                "starved": 0, "underflows": 0, "dropped": 0, "peak": 0}
-
-    def feed(self, pcm):
-        samples = memoryview(pcm).cast("h")
-        peak = max(max(samples), -min(samples)) if samples else 0
-        with self.lock:
-            self.stats["peak"] = max(self.stats["peak"], peak)
-            self.buffer += pcm
-            if len(self.buffer) > MAX_BUFFER_MS * BYTES_PER_MS:
-                drop = len(self.buffer) - TARGET_BUFFER_MS * BYTES_PER_MS
-                del self.buffer[:drop]
-                self.stats["dropped"] += drop
-
-    def _write(self):
-        while not self.stopping:
-            chunk = self.next_chunk(self.CHUNK)
-            try:
-                underflowed = self.stream.write(chunk)
-            except Exception as e:
-                log.warning("output failed: %s: %s", type(e).__name__, e)
-                self._reopen()
-                continue
-            if underflowed:
-                with self.lock:
-                    self.stats["underflows"] += 1
-
-    def next_chunk(self, n):
-        with self.lock:
-            stats = self.stats
-            level = len(self.buffer)
-            stats["chunks"] += 1
-            stats["level_sum"] += level
-            stats["level_max"] = max(stats["level_max"], level)
-            if stats["level_min"] is None or level < stats["level_min"]:
-                stats["level_min"] = level
-            if self.filling and level >= TARGET_BUFFER_MS * BYTES_PER_MS:
-                self.filling = False
-            if not self.filling and level < n:
-                # Ran dry: play silence until the target is held again
-                # rather than a click every time a frame comes late.
-                stats["starved"] += 1
-                self.filling = True
-            if self.filling:
-                return bytes(n)
-            chunk = bytes(self.buffer[:n])
-            del self.buffer[:n]
-            self.delivered += n
-            return chunk
-
-    def report(self):
-        """Describe playback since the last report."""
-        with self.lock:
-            stats, self.stats = self.stats, self._new_stats()
-        chunks = stats["chunks"] or 1
-        ms = lambda b: (b or 0) / BYTES_PER_MS
-        return (f"playback: buffer avg {ms(stats['level_sum'] / chunks):.0f} ms "
-                f"(min {ms(stats['level_min']):.0f}, max {ms(stats['level_max']):.0f}), "
-                f"starved {stats['starved']}, device underflows {stats['underflows']}, "
-                f"dropped {ms(stats['dropped']):.0f} ms, peak {stats['peak']}")
-
-    def close(self):
-        self.stopping = True
-        self.writer.join()
-        self.stream.close(ignore_errors=True)
-
-
 class Call:
-    def __init__(self, ntg, mic):
+    def __init__(self, ntg, mic, speaker):
         self.ntg = ntg
         self.mic = mic
+        self.speaker = speaker
         self.user_id = None
-        self.player = None
-        self.reporter = None
-
-    def on_frames(self, _id, mode, _device, frames):
-        if mode == StreamMode.PLAYBACK and self.player:
-            for frame in frames:
-                self.player.feed(frame.data)
 
     async def start(self, msg):
         state = msg["state"]
@@ -327,6 +152,13 @@ class Call:
         await self.ntg.set_stream_sources(
             self.user_id, StreamMode.CAPTURE,
             MediaDescription(device_audio(self.mic), None, None, None))
+        # Before connect_p2p: NTgCalls opens playback devices again when the
+        # call connects, and on Windows a speaker opened a second time blocks
+        # that thread for good.  Remote audio is the playback side's
+        # "microphone" track, as in py-tgcalls' RecordStream.
+        await self.ntg.set_stream_sources(
+            self.user_id, StreamMode.PLAYBACK,
+            MediaDescription(device_audio(self.speaker), None, None, None))
         await self.ntg.skip_exchange(self.user_id,
                                      b64(state["encryption_key"]),
                                      bool(msg.get("is_outgoing")))
@@ -338,23 +170,6 @@ class Call:
                                    list(protocol.get("library_versions") or []),
                                    bool(state.get("allow_p2p")),
                                    state.get("custom_parameters") or None)
-        # Remote audio is the playback side's "microphone" track, as in
-        # py-tgcalls' RecordStream.
-        self.player = Player(on_output=lambda name: emit(ev="output", name=name))
-        log.info("playing on %s, output latency %.0f ms",
-                 self.player.device_name, self.player.stream.latency * 1000)
-        if log.isEnabledFor(logging.DEBUG):
-            self.reporter = asyncio.create_task(self.report_playback())
-        await self.ntg.set_stream_sources(
-            self.user_id, StreamMode.PLAYBACK,
-            MediaDescription(AudioDescription(MediaSource.EXTERNAL, SAMPLE_RATE,
-                                              CHANNELS, "", False),
-                             None, None, None))
-
-    async def report_playback(self):
-        while True:
-            await asyncio.sleep(5)
-            log.debug("%s", self.player.report())
 
     async def handle(self, msg):
         op = msg["op"]
@@ -378,17 +193,9 @@ class Call:
                 await asyncio.wait_for(self.ntg.stop(self.user_id), 2)
             except Exception as e:
                 log.warning("stop: %s: %s", type(e).__name__, e)
-        if self.reporter:
-            self.reporter.cancel()
-        if self.player:
-            self.player.close()
-            if log.isEnabledFor(logging.DEBUG):
-                log.debug("%s", self.player.report())
-                log.debug("played %.1f s of remote audio",
-                          self.player.delivered / (BYTES_PER_MS * 1000))
 
 
-async def serve(mic):
+async def serve(mic, speaker):
     loop = asyncio.get_running_loop()
     lines = asyncio.Queue()
 
@@ -408,14 +215,10 @@ async def serve(mic):
         log.debug("connection %s", info.state.name)
         emit(ev="state", state=info.state.name, kind=info.kind.name)
 
-    call = Call(ntg, mic)
+    call = Call(ntg, mic, speaker)
     ntg.on_signaling_data(on_signal)
     ntg.on_connection_change(on_state)
-    ntg.on_frames(call.on_frames)
-    global sounddevice
-    sounddevice = import_sounddevice()
-    emit(ev="ready", mic=mic.name,
-         speaker=sounddevice.query_devices(output_device()[0])["name"])
+    emit(ev="ready", mic=mic.name, speaker=speaker.name)
 
     # One message at a time, from the loop's thread, which NTgCalls needs
     # to make its futures on; it buffers signalling that arrives after
@@ -456,13 +259,14 @@ def main():
         return
     devices = NTgCalls.get_media_devices()
     if args.devices:
-        for d in devices.microphone:
-            emit(kind="microphone", name=d.name)
+        for kind in ("microphone", "speaker"):
+            for d in getattr(devices, kind):
+                emit(kind=kind, name=d.name)
         return
     setup_logging(args.debug, args.log_dir, args.trace)
     mic = (pick(devices.microphone, args.mic) if args.mic
-           else default_microphone(devices.microphone))
-    asyncio.run(serve(mic))
+           else default_device(devices.microphone, True))
+    asyncio.run(serve(mic, default_device(devices.speaker, False)))
 
 
 if __name__ == "__main__":

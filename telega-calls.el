@@ -70,7 +70,7 @@ the new one."
   :type 'boolean)
 
 (defcustom telega-calls-debug nil
-  "Non-nil logs playback statistics in *telega-calls* every five seconds."
+  "Non-nil logs the helper's debugging messages in *telega-calls*."
   :type 'boolean)
 
 (defvar telega-calls--protocol nil
@@ -144,9 +144,6 @@ A Windows interpreter run from WSL needs a Windows path."
      (let ((state (downcase (plist-get msg :state))))
        (telega-calls--log "audio %s" state)
        (message "Call audio %s" state)))
-    ("output"
-     (telega-calls--log "playback moved to %s" (plist-get msg :name))
-     (message "Call audio now on %s" (plist-get msg :name)))
     ("error"
      (telega-calls--log "error in %s: %s"
                         (plist-get msg :op) (plist-get msg :message))
