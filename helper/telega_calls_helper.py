@@ -95,13 +95,17 @@ def default_device(devices, is_microphone):
 
     NTgCalls lists Windows' defaults as "Default - " entries, which also
     keeps them out of the Communications role and its turning other audio
-    down.  Elsewhere it goes through PulseAudio, which resolves the names
+    down.  On macOS an empty uid leaves NTgCalls' audio queue on the system
+    default.  On Linux it goes through PulseAudio, which resolves the names
     @DEFAULT_SOURCE@ and @DEFAULT_SINK@ itself; PipeWire's PulseAudio server
     does the same.
     """
     for device in devices:
         if device.name.startswith("Default - "):
             return device
+    if sys.platform == "darwin":
+        return Device("default input" if is_microphone else "default output",
+                      json.dumps({"is_microphone": is_microphone, "uid": ""}))
     return Device("default source" if is_microphone else "default sink",
                   json.dumps({"is_microphone": is_microphone,
                               "id": "@DEFAULT_SOURCE@" if is_microphone

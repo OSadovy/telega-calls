@@ -11,9 +11,10 @@ the call's signalling between the helper and TDLib.
 
 The bundled helper is Python on [NTgCalls](https://github.com/pytgcalls/ntgcalls).
 It is used on Windows, from Emacs under WSL2 with a Windows Python, so the
-audio is Windows'. It should also run on Linux with PulseAudio or PipeWire,
-but has not carried a real call there yet. Nothing in the Emacs side is tied
-to either: any program speaking the JSON-lines protocol at the top of
+audio is Windows'. An outgoing call has also worked on an Apple Silicon
+Mac. It should run on Linux with PulseAudio or PipeWire, but has not carried
+a real call there yet. Nothing in the Emacs side is tied to any of these:
+any program speaking the JSON-lines protocol at the top of
 `helper/telega_calls_helper.py` can replace the helper.
 
 ## Setup
@@ -28,8 +29,8 @@ to either: any program speaking the JSON-lines protocol at the top of
    C:\Users\me\telega-calls\venv\Scripts\python -m pip install -r helper\requirements.txt
    ```
 
-   On Linux the helper needs a PulseAudio server, which PipeWire provides
-   through `pipewire-pulse`:
+   On macOS or Linux; on Linux the helper needs a PulseAudio server, which
+   PipeWire provides through `pipewire-pulse`:
 
    ```
    python3 -m venv ~/.local/share/telega-calls/venv

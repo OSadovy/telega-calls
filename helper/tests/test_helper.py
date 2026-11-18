@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -46,7 +47,8 @@ class DefaultDevice(unittest.TestCase):
         devices = [self.Device("Speakers"), self.Device("Default - Headphones")]
         self.assertIs(helper.default_device(devices, False), devices[1])
 
-    def test_elsewhere_the_sound_server_resolves_it(self):
+    @mock.patch.object(sys, "platform", "linux")
+    def test_linux_sound_server_resolves_it(self):
         devices = [self.Device("Monitor of Built-in Audio"), self.Device("Built-in Audio")]
         mic = json.loads(helper.default_device(devices, True).metadata)
         speaker = json.loads(helper.default_device(devices, False).metadata)
